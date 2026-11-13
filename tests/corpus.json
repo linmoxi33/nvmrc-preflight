@@ -1,0 +1,160 @@
+{
+  "upstream": "nvm-sh/nvm",
+  "upstream_version": "0.41.0",
+  "note": "token/codes for every case were observed by running the real nvm_process_nvmrc from nvm 0.41.0 nvm.sh",
+  "cases": [
+    {
+      "name": "plain",
+      "content": "v18.12.1\n",
+      "token": "v18.12.1",
+      "codes": []
+    },
+    {
+      "name": "bare_minor",
+      "content": "18.12.1\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "leading_ws",
+      "content": " 18.12.1\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "trailing_ws",
+      "content": "18.12.1 \n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "tab_ws",
+      "content": "\t18.12.1\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "crlf",
+      "content": "18.12.1\r\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "comment",
+      "content": "# c\n18.12.1 # trailing\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "lts_star",
+      "content": "lts/*\n",
+      "token": "lts/*",
+      "codes": []
+    },
+    {
+      "name": "alias_node",
+      "content": "node\n",
+      "token": "node",
+      "codes": []
+    },
+    {
+      "name": "latest_alias",
+      "content": "latest\n",
+      "token": "latest",
+      "codes": []
+    },
+    {
+      "name": "bom",
+      "content": "\ufeff20.11.0\n",
+      "token": "\ufeff20.11.0",
+      "codes": [
+        "NRC008"
+      ]
+    },
+    {
+      "name": "empty",
+      "content": "",
+      "token": null,
+      "codes": [
+        "NRC001"
+      ]
+    },
+    {
+      "name": "blank_line",
+      "content": "\n",
+      "token": null,
+      "codes": [
+        "NRC001"
+      ]
+    },
+    {
+      "name": "two_bare",
+      "content": "18.12.1\n20.1.0\n",
+      "token": null,
+      "codes": [
+        "NRC002"
+      ]
+    },
+    {
+      "name": "kv_only",
+      "content": "a=1\nb=2\n",
+      "token": null,
+      "codes": [
+        "NRC003"
+      ]
+    },
+    {
+      "name": "kv_plus_bare",
+      "content": "a=1\n18.12.1\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "kv_spaces",
+      "content": "a = 1\n18.12.1\n",
+      "token": "18.12.1",
+      "codes": []
+    },
+    {
+      "name": "kv_node_key",
+      "content": "node=20\n18.12.1\n",
+      "token": null,
+      "codes": [
+        "NRC004"
+      ]
+    },
+    {
+      "name": "kv_duplicate",
+      "content": "a=1\nb=2\na=3\n18\n",
+      "token": null,
+      "codes": [
+        "NRC005"
+      ]
+    },
+    {
+      "name": "control_char",
+      "content": "18\u0001\n",
+      "token": null,
+      "codes": [
+        "NRC006"
+      ]
+    },
+    {
+      "name": "eq_start",
+      "content": "=x\n",
+      "token": "=x",
+      "codes": [
+        "NRC007",
+        "NRC011"
+      ]
+    },
+    {
+      "name": "internal_ws",
+      "content": "18 20\n",
+      "token": "18 20",
+      "codes": [
+        "NRC011"
+      ]
+    }
+  ]
+}

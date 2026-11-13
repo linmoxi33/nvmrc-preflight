@@ -1,0 +1,14 @@
+{
+  "tool": "nvmrc-preflight",
+  "version": "1.0.0",
+  "target": "/home/ubuntu/GitHub/work/trending/nvmrc-preflight/examples/in/good",
+  "nvmrc": "/home/ubuntu/GitHub/work/trending/nvmrc-preflight/examples/in/good/.nvmrc",
+  "token": "v18.12.1",
+  "findings": [],
+  "summary": {
+    "errors": 0,
+    "warnings": 0,
+    "infos": 0,
+    "fail_on": "warning"
+  }
+}

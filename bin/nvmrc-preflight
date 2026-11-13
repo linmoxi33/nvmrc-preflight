@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+"""nvmrc-preflight -- offline preflight for nvm's .nvmrc grammar.
+
+Reimplements, in the Python stdlib, the exact content-processing pipeline that
+nvm 0.41.0 uses in `nvm_process_nvmrc_content` / `nvm_process_nvmrc`
+(nvm.sh, lines ~941-1085), then reports the cases nvm accepts *silently* but
+which resolve to a token the user did not mean (UTF-8 BOM is the flagship).
+
+Exit codes: 0 = clean, 1 = findings at/above --fail-on, 2 = usage/input error.
+"""
+
+import argparse
+import io
+import json
+import os
+import re
+import sys
+
+VERSION = "1.0.0"
+
+# ---------------------------------------------------------------- grammar ---
+# Byte-level facts taken from nvm.sh v0.41.0 (verified live against the real
+# `nvm_process_nvmrc`; see tests/corpus.json and tests/test_oracle.py).
+
+BOM = "\ufeff"
+CONTROL_RE = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")  # everything but TAB
+# A token nvm will later accept when resolving (`nvm_is_version_or_alias`).
+RESOLVABLE_RE = re.compile(
+    r"""^(?:
+        v?\d+(?:\.\d+){0,2}            # 18 / 18.12 / 18.12.1 / v18.12.1
+      | iojs-v?\d+(?:\.\d+){0,2}
+      | node | iojs | system | current | latest | default | unstable
+      | lts/[a-z*][a-z0-9-]*          # lts/*, lts/argon, lts/-1
+      | [A-Za-z][A-Za-z0-9._-]*       # a plain alias name
+    )$""",
+    re.X,
+)
+
+CODE_SEVERITY = {
+    "NRC001": "error",   # nothing left after stripping comments
+    "NRC002": "error",   # more than one bare version-ish line
+    "NRC003": "error",   # only key=value pairs, no bare version-ish
+    "NRC004": "error",   # `node=...` key is explicitly rejected by nvm
+    "NRC005": "error",   # duplicate key
+    "NRC006": "error",   # control character (other than TAB) in content
+    "NRC007": "warning", # bare token starts with '=', never resolves
+    "NRC008": "error",   # UTF-8 BOM silently becomes part of the version
+    "NRC009": "info",    # CRLF line endings (nvm tolerates them)
+    "NRC010": "warning", # sibling .node-version is ignored by nvm
+    "NRC011": "warning", # token is not a shape nvm can resolve
+    "NRC012": "warning", # .nvmrc is a symlink
+}
+
+MESSAGES = {
+    "NRC001": "no content left after stripping comments; nvm reports 'invalid .nvmrc'",
+    "NRC002": "more than one bare version-ish line; nvm requires exactly one",
+    "NRC003": "only key=value pairs, no bare version-ish line; nvm requires one",
+    "NRC004": "key 'node' is rejected by nvm (nvm_process_nvmrc_content)",
+    "NRC005": "duplicate key in key=value pairs; nvm rejects it",
+    "NRC006": "control character (other than TAB) is rejected by nvm",
+    "NRC007": "bare line starts with '='; nvm returns it verbatim and it will never resolve",
+    "NRC008": "UTF-8 BOM survives nvm's pipeline and is prepended to the version token",
+    "NRC009": "CRLF line endings; nvm tolerates them (no action needed)",
+    "NRC010": "a .node-version file is present but nvm ignores it entirely",
+    "NRC011": "token is not a version/alias shape nvm can resolve",
+    "NRC012": ".nvmrc is a symlink; nvm refuses to print its content and only accepts a version or an existing alias",
+}
+
+
+class Finding:
+    __slots__ = ("code", "severity", "detail", "witness")
+
+    def __init__(self, code, detail=None, witness=None):
+        self.code = code
+        self.severity = CODE_SEVERITY[code]
+        self.detail = detail or MESSAGES[code]
+        self.witness = witness
+
+    def as_dict(self):
+        d = {"code": self.code, "severity": self.severity, "message": self.detail}
+        if self.witness:
+            d["witness"] = self.witness
+        return d
+
+
+# ---------------------------------------------------------------- parsing ---
+def strip_pipeline(text):
+    """Reproduce: sed 's/#.*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'."""
+    out = []
+    for raw_line in text.split("\n"):
+        line = raw_line.split("#", 1)[0]
+        line = line.strip(" \t\r\v\f")
+        if line:
+            out.append(line)
+    return out
+
+
+def parse_nvmrc(raw_bytes):
+    """Return (token, findings). `token` is None when nvm would reject the file.
+
+    The ordering of checks matches nvm_process_nvmrc_content exactly.
+    """
+    text = raw_bytes.decode("utf-8", errors="surrogateescape")
+    findings = []
+
+    lines = strip_pipeline(text)
+    if not lines:
+        findings.append(Finding("NRC001"))
+        return None, findings
+
+    for line in lines:
+        if CONTROL_RE.search(line):
+            findings.append(
+                Finding("NRC006", witness={"line": line, "codepoints": [ord(c) for c in line]})
+            )
+            return None, findings
+
+    keys = []
+    unpaired = None
+    for line in lines:
+        if line.startswith("="):
+            if unpaired is not None:
+                findings.append(Finding("NRC002", witness={"lines": lines}))
+                return None, findings
+            unpaired = line
+        elif "=" in line:
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if key == "node":
+                findings.append(Finding("NRC004", witness={"line": line}))
+                return None, findings
+            if key in keys:
+                findings.append(Finding("NRC005", witness={"key": key}))
+                return None, findings
+            keys.append(key)
+        else:
+            if unpaired is not None:
+                findings.append(Finding("NRC002", witness={"lines": lines}))
+                return None, findings
+            unpaired = line
+
+    if unpaired is None:
+        findings.append(Finding("NRC003", witness={"keys": keys}))
+        return None, findings
+
+    token = unpaired
+    if token.startswith(BOM):
+        findings.append(
+            Finding(
+                "NRC008",
+                witness={
+                    "token_hex": token.encode("utf-8", "surrogateescape").hex(),
+                    "first_bytes": list(token.encode("utf-8", "surrogateescape")[:3]),
+                    "would_be": token.lstrip(BOM),
+                },
+            )
+        )
+    if token.startswith("="):
+        findings.append(Finding("NRC007", witness={"token": token}))
+    if BOM not in token and not RESOLVABLE_RE.match(token):
+        findings.append(Finding("NRC011", witness={"token": token}))
+    return token, findings
+
+
+# -------------------------------------------------------------- discovery ---
+def find_nvmrc(start):
+    """Reproduce nvm_find_nvmrc: walk up from `start`, first .nvmrc wins."""
+    d = os.path.abspath(start)
+    while True:
+        candidate = os.path.join(d, ".nvmrc")
+        if os.path.exists(candidate) or os.path.islink(candidate):
+            return candidate
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def load_nvmrc(path):
+    """Read bytes plus any CRLF/symlink facts nvm would observe."""
+    info = {"crlf": False, "symlink": os.path.islink(path)}
+    if info["symlink"]:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    else:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+        info["crlf"] = b"\r\n" in raw
+    return raw, info
+
+
+# --------------------------------------------------------------- commands ---
+def run_check(target, fail_on):
+    path = find_nvmrc(target)
+    result = {
+        "tool": "nvmrc-preflight",
+        "version": VERSION,
+        "target": os.path.abspath(target),
+        "nvmrc": None,
+        "token": None,
+        "findings": [],
+    }
+    worst = 0  # 0 clean, 1 error, 2 warning
+
+    if path is None:
+        result["findings"].append(
+            {"code": "NRC000", "severity": "warning", "message": "no .nvmrc found walking up from target"}
+        )
+        worst = max(worst, 2)
+    else:
+        raw, info = load_nvmrc(path)
+        result["nvmrc"] = path
+        token, findings = parse_nvmrc(raw)
+        result["token"] = token
+        if info["crlf"]:
+            findings.append(Finding("NRC009", witness={"bytes": raw.count(b"\r\n")}))
+        if info["symlink"]:
+            findings.append(
+                Finding(
+                    "NRC012",
+                    detail=".nvmrc is a symlink; nvm refuses to print its content and only accepts "
+                    "a version or existing alias",
+                    witness={"link_target": os.readlink(path)},
+                )
+            )
+        result["findings"] = [f.as_dict() for f in findings]
+        for f in findings:
+            if f.severity == "error":
+                worst = max(worst, 1)
+            elif f.severity == "warning":
+                worst = max(worst, 2)
+
+    # sibling .node-version next to the .nvmrc nvm actually reads
+    probe_dir = os.path.dirname(path) if path else os.path.abspath(target)
+    nv = os.path.join(probe_dir, ".node-version")
+    if path is not None and os.path.exists(nv):
+        result["findings"].append(
+            {
+                "code": "NRC010",
+                "severity": "warning",
+                "message": MESSAGES["NRC010"],
+                "witness": {"path": nv},
+            }
+        )
+        worst = max(worst, 2)
+
+    order = {"error": 0, "warning": 1, "info": 2}
+    result["findings"].sort(key=lambda f: (order[f["severity"]], f["code"]))
+    result["summary"] = {
+        "errors": sum(1 for f in result["findings"] if f["severity"] == "error"),
+        "warnings": sum(1 for f in result["findings"] if f["severity"] == "warning"),
+        "infos": sum(1 for f in result["findings"] if f["severity"] == "info"),
+        "fail_on": fail_on,
+    }
+
+    if fail_on == "error":
+        failed = worst == 1
+    elif fail_on == "warning":
+        failed = worst in (1, 2)
+    else:  # never
+        failed = False
+    return result, (1 if failed else 0)
+
+
+def run_resolve(target):
+    path = find_nvmrc(target)
+    if path is None:
+        return {
+            "target": os.path.abspath(target),
+            "nvmrc": None,
+            "token": None,
+            "status": "no-nvmrc",
+        }, 2
+    raw, info = load_nvmrc(path)
+    token, findings = parse_nvmrc(raw)
+    payload = {
+        "target": os.path.abspath(target),
+        "nvmrc": path,
+        "token": token,
+        "status": "ok" if token is not None else "invalid",
+        "errors": [f.code for f in findings if f.severity == "error"],
+    }
+    return payload, (0 if token is not None else 1)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="nvmrc-preflight", description=__doc__.splitlines()[0])
+    parser.add_argument("--version", action="version", version=VERSION)
+    sub = parser.add_subparsers(dest="command")
+
+    p_check = sub.add_parser("check", help="report findings for the .nvmrc nvm would read")
+    p_check.add_argument("path", nargs="?", default=".")
+    p_check.add_argument("--json", action="store_true")
+    p_check.add_argument("--fail-on", choices=("error", "warning", "never"), default="warning")
+
+    p_res = sub.add_parser("resolve", help="print the token nvm would read")
+    p_res.add_argument("path", nargs="?", default=".")
+    p_res.add_argument("--json", action="store_true")
+
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help(sys.stderr)
+        return 2
+
+    if not os.path.exists(args.path):
+        print("nvmrc-preflight: no such path: %s" % args.path, file=sys.stderr)
+        return 2
+    try:
+        if args.command == "check":
+            result, code = run_check(args.path, args.fail_on)
+            if args.json:
+                json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+                sys.stdout.write("\n")
+            else:
+                print("nvmrc: %s" % (result["nvmrc"] or "<none>"))
+                print("token: %s" % ("<invalid>" if result["token"] is None else repr(result["token"])))
+                for f in result["findings"]:
+                    print("%-6s %-7s %s" % (f["code"], f["severity"], f["message"]))
+                s = result["summary"]
+                print("summary: %d error(s), %d warning(s), %d info(s) (fail-on=%s)"
+                      % (s["errors"], s["warnings"], s["infos"], s["fail_on"]))
+            return code
+        payload, code = run_resolve(args.path)
+        if args.json:
+            json.dump(payload, sys.stdout, indent=2, ensure_ascii=False)
+            sys.stdout.write("\n")
+        else:
+            if payload["token"] is None:
+                print("invalid", file=sys.stderr)
+            else:
+                print(payload["token"])
+        return code
+    except OSError as exc:
+        print("nvmrc-preflight: %s" % exc, file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

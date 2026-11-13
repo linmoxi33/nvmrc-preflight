@@ -1,0 +1,29 @@
+{
+  "tool": "nvmrc-preflight",
+  "version": "1.0.0",
+  "target": "/home/ubuntu/GitHub/work/trending/nvmrc-preflight/examples/in/bom",
+  "nvmrc": "/home/ubuntu/GitHub/work/trending/nvmrc-preflight/examples/in/bom/.nvmrc",
+  "token": "﻿20.11.0",
+  "findings": [
+    {
+      "code": "NRC008",
+      "severity": "error",
+      "message": "UTF-8 BOM survives nvm's pipeline and is prepended to the version token",
+      "witness": {
+        "token_hex": "efbbbf32302e31312e30",
+        "first_bytes": [
+          239,
+          187,
+          191
+        ],
+        "would_be": "20.11.0"
+      }
+    }
+  ],
+  "summary": {
+    "errors": 1,
+    "warnings": 0,
+    "infos": 0,
+    "fail_on": "warning"
+  }
+}
